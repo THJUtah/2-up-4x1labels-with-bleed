@@ -19,11 +19,25 @@ def build_two_labels(pdf_bytes: bytes,
                      die_gap_in: float,
                      scale_percent: float,
                      use_cropbox: bool) -> bytes:
-    """Create a single-page PDF with exactly TWO vertically stacked labels.
-       - Vertical-only scale = 1 + scale_percent/100 (centers locked)
-       - Gap is exact (die_gap_in)
-       - Page height expanded so added bleed isn’t clipped
     """
+    Outputs ONE page with exactly TWO vertically stacked labels.
+    Vertical-only scale (sy) creates bleed; centers effectively stay in place
+    with a bottom margin = extra/2 and an enlarged page height.
+    """
+    import io
+    from pypdf import PdfReader, PdfWriter, Transformation
+
+    POINTS_PER_INCH = 72.0
+
+    def _get_box(page, use_crop: bool):
+        return page.cropbox if use_crop and page.cropbox is not None else page.mediabox
+
+    def _dims(page, use_crop: bool):
+        box = _get_box(page, use_crop)
+        llx = float(box.left); lly = float(box.bottom)
+        urx = float(box.right); ury = float(box.top)
+        return llx, lly, (urx - llx), (ury - lly)
+
     reader = PdfReader(io.BytesIO(pdf_bytes))
     if len(reader.pages) == 0:
         raise ValueError("PDF has no pages.")
@@ -31,40 +45,34 @@ def build_two_labels(pdf_bytes: bytes,
         raise IndexError(f"Page index {page_index} out of range 0..{len(reader.pages)-1}")
 
     src = reader.pages[page_index]
-    llx, lly, w_pts, h_pts = get_dims_from_box(src, use_cropbox)
+    llx, lly, w_pts, h_pts = _dims(src, use_cropbox)
 
     gap_pts = die_gap_in * POINTS_PER_INCH
-    sy = 1.0 + (scale_percent / 100.0)  # vertical-only scale factor
+    sy = 1.0 + (scale_percent / 100.0)          # vertical scale (e.g., 1.02 for 2%)
+    placed_h = h_pts * sy                       # scaled height
+    extra = placed_h - h_pts                    # added bleed height
+    bottom_margin = extra / 2.0                 # give half of the bleed below the first label
 
-    # Page geometry:
-    # original two labels + gap = 2*h_pts + gap_pts
-    # vertical scaling adds sy*H - H = (sy-1)*H total across extremes (half on bottom, half on top)
-    extra_height = (sy - 1.0) * h_pts
+    # Final page: width = original width; height = 2*placed_h + gap
     out_w = w_pts
-    out_h = (2 * h_pts) + gap_pts + extra_height
+    out_h = (2 * placed_h) + gap_pts
 
     writer = PdfWriter()
     out_page = writer.add_blank_page(width=out_w, height=out_h)
 
-    # Distribute the extra height equally to bottom and top so centers stay where they should:
-    bottom_margin = extra_height / 2.0
+    # Base transform: move chosen box LL to origin, then scale vertically from origin
+    base = Transformation().translate(-llx, -lly).scale(1.0, sy)
 
-    # Base transform maps chosen box LL to origin
-    base = Transformation().translate(-llx, -lly)
+    # Bottom positions for each (AFTER scaling-from-origin):
+    y0 = bottom_margin                      # first label bottom
+    y1 = bottom_margin + h_pts + gap_pts    # second label bottom
 
-    # Centerlines (unchanged by scaling):
-    # label 0 center: bottom_margin + h/2
-    # label 1 center: bottom_margin + h + gap + h/2
-    c0 = bottom_margin + (h_pts / 2.0)
-    c1 = bottom_margin + h_pts + gap_pts + (h_pts / 2.0)
+    # Place both copies by translating upward from the origin
+    t0 = base.translate(0, y0)
+    t1 = base.translate(0, y1)
 
-    # To scale about the center: T = Translate(0, c) * Scale(1, sy) * Translate(0, -c) * base
-    # pypdf composes left->right on calls; we build per-label transforms accordingly
-    t0 = base.translate(0, c0).scale(1.0, sy).translate(0, -c0)
-    t1 = base.translate(0, c1).scale(1.0, sy).translate(0, -c1)
-
-    out_page.merge_transformed_page(src, t0)  # bottom label
-    out_page.merge_transformed_page(src, t1)  # top label
+    out_page.merge_transformed_page(src, t0)
+    out_page.merge_transformed_page(src, t1)
 
     buf = io.BytesIO()
     writer.write(buf)
