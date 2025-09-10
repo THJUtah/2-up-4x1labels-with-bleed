@@ -1,45 +1,58 @@
 import io
-import argparse
+import streamlit as st
+from typing import Tuple
 from pypdf import PdfReader, PdfWriter, Transformation
 
 POINTS_PER_INCH = 72.0
 
-def _get_box(page, use_cropbox: bool):
+def get_box(page, use_cropbox: bool):
     return page.cropbox if use_cropbox and page.cropbox is not None else page.mediabox
 
-def _get_dims(page, use_cropbox: bool):
-    box = _get_box(page, use_cropbox)
-    llx = float(box.left);  lly = float(box.bottom)
+def get_dims_from_box(page, use_cropbox: bool):
+    box = get_box(page, use_cropbox)
+    llx = float(box.left); lly = float(box.bottom)
     urx = float(box.right); ury = float(box.top)
-    return llx, lly, (urx-llx), (ury-lly)
+    w = urx - llx; h = ury - lly
+    return llx, lly, w, h
 
-def build_strip_bytes(pdf_bytes: bytes, page_index: int, count: int, die_gap_in: float, bleed_in: float, use_cropbox: bool, scale_for_bleed: bool) -> bytes:
+def build_strip(pdf_bytes: bytes,
+                page_index: int,
+                count: int,
+                die_gap_in: float,
+                bleed_in: float,
+                use_cropbox: bool,
+                scale_for_bleed: bool) -> bytes:
     reader = PdfReader(io.BytesIO(pdf_bytes))
     if len(reader.pages) == 0:
         raise ValueError("PDF has no pages.")
     if not (0 <= page_index < len(reader.pages)):
         raise IndexError(f"Page index {page_index} out of range 0..{len(reader.pages)-1}")
-
     src = reader.pages[page_index]
-    llx, lly, w_pts, h_pts = _get_dims(src, use_cropbox)
+
+    llx, lly, w_pts, h_pts = get_dims_from_box(src, use_cropbox)
     gap_pts = die_gap_in * POINTS_PER_INCH
     bleed_pts = bleed_in * POINTS_PER_INCH
 
+    # Output page size: width = input width; height = N*H + (N-1)*G + 2*B
     out_w = w_pts
     out_h = count * h_pts + (count - 1) * gap_pts + 2 * bleed_pts
 
     writer = PdfWriter()
     out_page = writer.add_blank_page(width=out_w, height=out_h)
 
+    # Base: align chosen box lower-left to (0,0)
     base_t = Transformation().translate(-llx, -lly)
 
+    # If scaling for bleed, scale vertically so placed art height = H + 2B (width unchanged)
     if scale_for_bleed and h_pts > 0:
         scale_y = (h_pts + 2 * bleed_pts) / h_pts
         base_t = base_t.scale(1.0, scale_y)
         placed_h = h_pts * scale_y
     else:
-        placed_h = h_pts + 2 * bleed_pts
+        # No scaling: placed art height remains H; bleed will only affect page margins/overlap
+        placed_h = h_pts + 2 * bleed_pts  # used for placement math (centerline logic)
 
+    # Centers stay fixed: y_center_i = B + i*(H + G) + H/2
     for i in range(count):
         y_center = bleed_pts + i * (h_pts + gap_pts) + h_pts / 2.0
         y_bottom = y_center - placed_h / 2.0
@@ -50,25 +63,65 @@ def build_strip_bytes(pdf_bytes: bytes, page_index: int, count: int, die_gap_in:
     writer.write(buf)
     return buf.getvalue()
 
-def build_strip_file(in_path: str, out_path: str, page_index: int, count: int, die_gap_in: float, bleed_in: float, use_cropbox: bool, scale_for_bleed: bool) -> None:
-    with open(in_path, "rb") as f:
-        pdf_bytes = f.read()
-    out = build_strip_bytes(pdf_bytes, page_index, count, die_gap_in, bleed_in, use_cropbox, scale_for_bleed)
-    with open(out_path, "wb") as f:
-        f.write(out)
+st.set_page_config(page_title="Label Strip Builder (Fixed Die Gap + Bleed)", page_icon="📏", layout="centered")
+st.title("Label Strip Builder")
+st.write("Build a **single PDF strip** of N labels with a fixed **die gap** and optional **top/bottom bleed**.")
+st.caption("First label is bottom-aligned. Centers stay locked; bleed adjusts overlap only.")
 
-def _cli():
-    p = argparse.ArgumentParser(description="Build a strip of N labels with fixed die gap and bleed.")
-    p.add_argument("input", help="Input PDF path")
-    p.add_argument("output", help="Output PDF path")
-    p.add_argument("--page", type=int, default=0, help="0-based page index to duplicate (default 0)")
-    p.add_argument("--count", type=int, default=10, help="Number of labels to stack")
-    p.add_argument("--gap", type=float, default=0.1875, help="Die gap in inches between labels (default 0.1875)")
-    p.add_argument("--bleed", type=float, default=0.06, help="Bleed in inches (top & bottom)")
-    p.add_argument("--use-cropbox", action="store_true", help="Use the PDF CropBox instead of MediaBox")
-    p.add_argument("--scale-for-bleed", action="store_true", help="Scale vertically so placed art height = label_h + 2*bleed")
-    args = p.parse_args()
-    build_strip_file(args.input, args.output, args.page, args.count, args.gap, args.bleed, args.use_cropbox, args.scale_for_bleed)
+uploaded = st.file_uploader("Upload a label PDF", type=["pdf"])
+col1, col2 = st.columns(2)
+with col1:
+    count = st.number_input("Number of labels (N)", min_value=1, value=10, step=1)
+    gap_in = st.number_input("Die gap (inches)", min_value=0.0, value=0.1875, step=0.0001, format="%.4f")
+with col2:
+    bleed_in = st.number_input("Bleed (inches, top & bottom)", min_value=0.0, value=0.0600, step=0.0001, format="%.4f")
+    scale_for_bleed = st.checkbox("Scale vertically to create bleed if needed", value=False)
 
-if __name__ == "__main__":
-    _cli()
+box_choice = st.radio("Use which box for placement?", ["MediaBox (default)", "CropBox"], index=0, horizontal=True)
+use_cropbox = (box_choice == "CropBox")
+
+if uploaded is not None:
+    data = uploaded.read()
+    reader = PdfReader(io.BytesIO(data))
+    total_pages = len(reader.pages)
+
+    mb = reader.pages[0].mediabox
+    cb = reader.pages[0].cropbox if reader.pages[0].cropbox is not None else None
+
+    def dims(box):
+        if box is None: return None
+        llx = float(box.left); lly = float(box.bottom)
+        urx = float(box.right); ury = float(box.top)
+        return (urx-llx)/72.0, (ury-lly)/72.0
+
+    mb_dims = dims(mb)
+    cb_dims = dims(cb) if cb else None
+
+    info = f"Pages: **{total_pages}** | MediaBox: **{mb_dims[0]:.4f}×{mb_dims[1]:.4f} in**"
+    if cb_dims: info += f" | CropBox: **{cb_dims[0]:.4f}×{cb_dims[1]:.4f} in**"
+    st.info(info)
+
+    page_idx = 0
+    if total_pages > 1:
+        page_idx = st.number_input("Choose page (0-based)", min_value=0, max_value=total_pages-1, value=0, step=1)
+
+    if st.button("Build strip PDF"):
+        try:
+            out_bytes = build_strip(
+                data,
+                page_idx,
+                int(count),
+                float(gap_in),
+                float(bleed_in),
+                use_cropbox,
+                bool(scale_for_bleed)
+            )
+            _, _, w_pts, h_pts = get_dims_from_box(reader.pages[page_idx], use_cropbox)
+            out_h_in = (int(count)*h_pts + (int(count)-1)*float(gap_in)*72.0 + 2*float(bleed_in)*72.0)/72.0
+            out_name = uploaded.name.replace(".pdf", "") + f"_strip_{count}x_gap{gap_in:.4f}in_bleed{bleed_in:.4f}in.pdf"
+            st.success(f"Done! Output page size: {w_pts/72.0:.4f} in × {out_h_in:.4f} in")
+            st.download_button("Download strip PDF", data=out_bytes, file_name=out_name, mime="application/pdf")
+        except Exception as e:
+            st.error(f"Error: {e}")
+else:
+    st.caption("Tip: Internal math uses points (1 in = 72 pt), so the die gap is exact even if your printer UI rounds.")
