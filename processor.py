@@ -5,7 +5,7 @@ from pypdf import PdfReader, PdfWriter, Transformation
 POINTS_PER_INCH = 72.0
 PAGE_W_IN = 4.02
 PAGE_H_IN = 2.1875
-GAP_IN     = 0.1875
+GAP_IN     = 0.18
 SCALE_PCT  = 0.005
 
 def _get_box(page, use_cropbox: bool):
