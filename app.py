@@ -5,10 +5,10 @@ from pypdf import PdfReader, PdfWriter, Transformation
 POINTS_PER_INCH = 72.0
 
 # === Spec constants ===
-PAGE_W_IN = 4.02
+PAGE_W_IN = 4.06
 PAGE_H_IN = 2.1875
-GAP_IN     = 0.1875  # between labels, and an extra one above the top label
-SCALE_PCT  = 0.005   # scale both X and Y by +0.005% for micro-bleed
+GAP_IN     = 0.18  # between labels, and an extra one above the top label
+SCALE_PCT  = 0.03   # scale both X and Y by +0.005% for micro-bleed
 
 def get_box(page, use_cropbox: bool):
     return page.cropbox if use_cropbox and page.cropbox is not None else page.mediabox
