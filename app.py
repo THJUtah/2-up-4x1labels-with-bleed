@@ -6,7 +6,7 @@ POINTS_PER_INCH = 72.0
 
 # === Spec constants ===
 PAGE_W_IN = 4.02
-PAGE_H_IN = 2.30
+PAGE_H_IN = 2.1875
 GAP_IN     = 0.1875  # between labels, and an extra one above the top label
 SCALE_PCT  = 0.005   # scale both X and Y by +0.005% for micro-bleed
 
